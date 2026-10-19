@@ -122,7 +122,7 @@ jobs:
 
       - name: Build Tauri installer
         working-directory: crates-tauri/yaak-app-client
-        run: node ../../node_modules/@tauri-apps/cli/tauri.js build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config tauri.conf.json --config tauri.release.conf.json --config '{"build":{"beforeBuildCommand":""}}' --no-sign
+        run: node ../../node_modules/@tauri-apps/cli/tauri.js build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config tauri.conf.json --config tauri.main.conf.json --config '{"build":{"beforeBuildCommand":""}}' --no-sign
 
       - name: Upload ${{ matrix.name }} installer
         uses: actions/upload-artifact@v4
