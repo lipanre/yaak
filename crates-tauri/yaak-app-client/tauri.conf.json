@@ -42,6 +42,11 @@
       "vendored/plugin-runtime",
       "vendored/node/yaaknode*",
       "vendored/protoc/yaakprotoc*"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installerHooks": "windows/installer-hooks.nsh"
+      }
+    }
   }
 }

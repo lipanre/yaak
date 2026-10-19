@@ -750,7 +750,7 @@ function Sidebar({ className }: { className?: string }) {
           renderContextMenu={renderContextMenuFn}
           onActivate={handleActivate}
           getEditOptions={getEditOptions}
-          className="pl-2 pr-3 pt-2 pb-2"
+          className="pl-2 pr-3 pt-2 pb-2 [&_.tree-item:has(.request-row)]:h-lg!"
           onDragEnd={handleDragEnd}
         />
       )}
@@ -1205,11 +1205,16 @@ const SidebarInnerItem = memo(function SidebarInnerItem({
   const address = isHttpRequest ? item.url.trim() || resolvedModelName(item) : "";
 
   return (
-    <div className="flex items-center gap-2 min-w-0 h-full w-full text-left">
+    <div
+      className={classNames(
+        "flex items-center gap-2 min-w-0 h-full w-full text-left",
+        isHttpRequest && "request-row",
+      )}
+    >
       <div
         className={classNames(
           isHttpRequest
-            ? "grid min-w-0 flex-1 grid-cols-[minmax(0,2fr)_minmax(0,3fr)] items-center gap-3"
+            ? "flex min-w-0 flex-1 flex-col justify-center gap-1 leading-tight"
             : "truncate flex-1",
           gitStatus === "modified" && "text-info",
           gitStatus === "untracked" && "text-success",
@@ -1224,7 +1229,7 @@ const SidebarInnerItem = memo(function SidebarInnerItem({
             >
               {name || "—"}
             </span>
-            <span className="truncate text-right" title={address}>
+            <span className="truncate text-2xs opacity-80" title={address}>
               {address}
             </span>
           </>
