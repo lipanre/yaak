@@ -1,6 +1,6 @@
 {
   "productName": "Yaak",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "identifier": "app.yaak.desktop",
   "build": {
     "beforeBuildCommand": "npm --prefix ../.. run client:tauri-before-build",
