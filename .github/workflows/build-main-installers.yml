@@ -1,0 +1,163 @@
+name: Build Main Installers
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-main-installers-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prepare-vendored-assets:
+    name: Prepare plugin assets
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version: "24"
+          cache: true
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: vp install
+
+      - name: Build plugin assets
+        env:
+          SKIP_WASM_BUILD: "1"
+        run: npm run build
+
+      - name: Vendor plugin assets
+        run: npm run vendor:vendor-plugins
+
+      - name: Upload plugin assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: vendored-plugin-assets
+          path: |
+            crates-tauri/yaak-app-client/vendored/plugin-runtime/index.cjs
+            crates-tauri/yaak-app-client/vendored/plugins
+          if-no-files-found: error
+          retention-days: 1
+
+  build-installers:
+    name: Build ${{ matrix.name }}
+    needs: prepare-vendored-assets
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            yaak_arch: x64
+            bundles: nsis
+            artifact_path: target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          - name: macos-arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            yaak_arch: arm64
+            bundles: dmg
+            artifact_path: target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          - name: macos-x64
+            os: macos-latest
+            target: x86_64-apple-darwin
+            yaak_arch: x64
+            bundles: dmg
+            artifact_path: target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+    env:
+      YAAK_TARGET_ARCH: ${{ matrix.yaak_arch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version: "24"
+          cache: true
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: installers-${{ matrix.name }}
+          cache-on-failure: true
+
+      - name: Install dependencies
+        run: vp install
+
+      - name: Download plugin assets
+        uses: actions/download-artifact@v4
+        with:
+          name: vendored-plugin-assets
+          path: crates-tauri/yaak-app-client/vendored
+
+      - name: Vendor Node sidecar
+        run: npm run vendor:vendor-node
+
+      - name: Vendor protoc
+        run: npm run vendor:vendor-protoc
+
+      - name: Build frontend
+        run: npm run build --workspace apps/yaak-client
+
+      - name: Build Tauri installer
+        working-directory: crates-tauri/yaak-app-client
+        run: node ../../node_modules/@tauri-apps/cli/tauri.js build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config tauri.conf.json --config tauri.release.conf.json --config '{"build":{"beforeBuildCommand":""}}' --no-sign
+
+      - name: Upload ${{ matrix.name }} installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: yaak-${{ matrix.name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Create GitHub Release
+    needs: build-installers
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download installers
+        uses: actions/download-artifact@v4
+        with:
+          pattern: yaak-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: main-build-${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          name: "Yaak main build #${{ github.run_number }}"
+          body: |
+            Automated build from `${{ github.sha }}`.
+
+            Triggered by @${{ github.actor }}.
+          prerelease: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: release-assets/*
+          token: ${{ secrets.GITHUB_TOKEN }}
