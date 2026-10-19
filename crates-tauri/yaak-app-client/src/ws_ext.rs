@@ -2,6 +2,7 @@
 //! These wrap the core yaak-ws functionality for Tauri IPC.
 
 use crate::PluginContextExt;
+use crate::error::Error::GenericError;
 use crate::error::Result;
 use crate::models_ext::QueryManagerExt;
 use http::HeaderMap;
@@ -19,7 +20,7 @@ use yaak_http::cookies::CookieStore;
 use yaak_http::path_placeholders::apply_path_placeholders;
 use yaak_models::models::{
     HttpResponseHeader, WebsocketConnection, WebsocketConnectionState, WebsocketEvent,
-    WebsocketEventType,
+    WebsocketEventType, WebsocketRequestProtocol,
 };
 use yaak_models::util::UpdateSource;
 use yaak_plugins::events::{CallHttpAuthenticationRequest, HttpHeader, RenderPurpose};
@@ -27,6 +28,7 @@ use yaak_plugins::template_callback::PluginTemplateCallback;
 use yaak_templates::strip_json_comments::maybe_strip_json_comments;
 use yaak_templates::{RenderErrorBehavior, RenderOptions};
 use yaak_tls::find_client_certificate;
+use yaak_ws::stomp::{connect_frame, send_frame, subscribe_frames};
 use yaak_ws::{WebsocketManager, render_websocket_request};
 
 pub async fn cmd_ws_send<R: Runtime>(
@@ -94,6 +96,14 @@ async fn send_websocket_message<R: Runtime>(
     .await?;
 
     let message = maybe_strip_json_comments(&request.message);
+    let message = if request.protocol == WebsocketRequestProtocol::Stomp {
+        if request.stomp_destination.trim().is_empty() {
+            return Err(GenericError("STOMP send destination is required".to_string()));
+        }
+        send_frame(&request.stomp_destination, &message)
+    } else {
+        message
+    };
 
     let mut ws_manager = ws_manager.lock().await;
     ws_manager.send(&connection.id, Message::Text(message.clone().into())).await?;
@@ -114,6 +124,69 @@ async fn send_websocket_message<R: Runtime>(
     })?;
 
     Ok(connection.clone())
+}
+
+pub async fn cmd_stomp_subscribe<R: Runtime>(
+    connection_id: &str,
+    environment_id: Option<&str>,
+    app_handle: AppHandle<R>,
+    window: WebviewWindow<R>,
+    ws_manager: State<'_, Mutex<WebsocketManager>>,
+) -> Result<WebsocketConnection> {
+    let connection = app_handle.db().get_websocket_connection(connection_id)?;
+    let unrendered_request = app_handle.db().get_websocket_request(&connection.request_id)?;
+    if unrendered_request.protocol != WebsocketRequestProtocol::Stomp {
+        return Err(GenericError(
+            "Subscriptions are only supported for STOMP requests".to_string(),
+        ));
+    }
+
+    let environment_chain = app_handle.db().resolve_environments(
+        &unrendered_request.workspace_id,
+        unrendered_request.folder_id.as_deref(),
+        environment_id,
+    )?;
+    let (resolved_request, _) = resolve_websocket_request(&window.db(), &unrendered_request)?;
+    let plugin_manager = Arc::new(crate::plugins_ext::plugin_manager(&app_handle).await?);
+    let encryption_manager = Arc::new((*app_handle.state::<EncryptionManager>()).clone());
+    let request = render_websocket_request(
+        &resolved_request,
+        environment_chain,
+        &PluginTemplateCallback::new(
+            plugin_manager,
+            encryption_manager,
+            &window.plugin_context(),
+            RenderPurpose::Send,
+        ),
+        &RenderOptions { error_behavior: RenderErrorBehavior::Throw },
+    )
+    .await?;
+
+    let frames = subscribe_frames(&request.stomp_subscriptions);
+    if frames.is_empty() {
+        return Err(GenericError("Add at least one STOMP subscription destination".to_string()));
+    }
+
+    let mut ws_manager = ws_manager.lock().await;
+    for frame in frames {
+        ws_manager.send(&connection.id, Message::Text(frame.clone().into())).await?;
+        app_handle.with_tx(|tx| {
+            tx.upsert_websocket_event(
+                &WebsocketEvent {
+                    connection_id: connection.id.clone(),
+                    request_id: request.id.clone(),
+                    workspace_id: connection.workspace_id.clone(),
+                    is_server: false,
+                    message_type: WebsocketEventType::Text,
+                    message: frame.into_bytes(),
+                    ..Default::default()
+                },
+                &UpdateSource::from_window_label(window.label()),
+            )
+        })?;
+    }
+
+    Ok(connection)
 }
 
 pub async fn cmd_ws_close<R: Runtime>(
@@ -313,20 +386,45 @@ pub async fn cmd_ws_connect<R: Runtime>(
     }
 
     let client_cert = find_client_certificate(url.as_str(), &settings.client_certificates);
+    let is_stomp = request.protocol == WebsocketRequestProtocol::Stomp;
+    let stomp_connect_frame = is_stomp.then(|| connect_frame(&url));
+    let stomp_subscribe_frames =
+        if is_stomp { subscribe_frames(&request.stomp_subscriptions) } else { Vec::new() };
+    let stomp_sent_frames = stomp_connect_frame
+        .iter()
+        .chain(stomp_subscribe_frames.iter())
+        .cloned()
+        .collect::<Vec<String>>();
 
-    let response = match ws_manager
-        .connect(
-            &connection.id,
-            url.as_str(),
-            headers,
-            receive_tx,
-            resolved_settings.validate_certificates.value,
-            client_cert,
-            resolved_settings.request_message_size.value,
-        )
-        .await
-    {
-        Ok(r) => r,
+    let (response, initial_stomp_messages) = match if is_stomp {
+        ws_manager
+            .connect_stomp(
+                &connection.id,
+                url.as_str(),
+                headers,
+                receive_tx,
+                resolved_settings.validate_certificates.value,
+                client_cert,
+                resolved_settings.request_message_size.value,
+                stomp_connect_frame.unwrap_or_default(),
+                stomp_subscribe_frames,
+            )
+            .await
+    } else {
+        ws_manager
+            .connect(
+                &connection.id,
+                url.as_str(),
+                headers,
+                receive_tx,
+                resolved_settings.validate_certificates.value,
+                client_cert,
+                resolved_settings.request_message_size.value,
+            )
+            .await
+            .map(|response| (response, Vec::new()))
+    } {
+        Ok(result) => result,
         Err(e) => {
             return Ok(app_handle.with_tx(|tx| {
                 tx.upsert_websocket_connection(
@@ -353,6 +451,43 @@ pub async fn cmd_ws_connect<R: Runtime>(
             },
             &UpdateSource::from_window_label(window.label()),
         )
+    })?;
+
+    app_handle.with_tx(|tx| {
+        for frame in stomp_sent_frames {
+            tx.upsert_websocket_event(
+                &WebsocketEvent {
+                    connection_id: connection.id.clone(),
+                    request_id: request.id.clone(),
+                    workspace_id: connection.workspace_id.clone(),
+                    is_server: false,
+                    message_type: WebsocketEventType::Text,
+                    message: frame.into_bytes(),
+                    ..Default::default()
+                },
+                &UpdateSource::from_window_label(window.label()),
+            )?;
+        }
+        for message in initial_stomp_messages {
+            let message_type = match &message {
+                Message::Text(_) => WebsocketEventType::Text,
+                Message::Binary(_) => WebsocketEventType::Binary,
+                _ => continue,
+            };
+            tx.upsert_websocket_event(
+                &WebsocketEvent {
+                    connection_id: connection.id.clone(),
+                    request_id: request.id.clone(),
+                    workspace_id: connection.workspace_id.clone(),
+                    is_server: true,
+                    message_type,
+                    message: message.into_data().to_vec(),
+                    ..Default::default()
+                },
+                &UpdateSource::from_window_label(window.label()),
+            )?;
+        }
+        Ok(())
     })?;
 
     let response_headers = response

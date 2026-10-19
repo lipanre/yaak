@@ -99,6 +99,19 @@ export function getCreateDropdownItems({
         onCreate?.("websocket_request", id);
       },
     },
+    {
+      label: "WebSocket STOMP",
+      leftSlot: hideIcons ? undefined : <Icon icon="plus" />,
+      onSelect: async () => {
+        const id = await createRequestAndNavigate({
+          model: "websocket_request",
+          workspaceId,
+          folderId,
+          protocol: "stomp",
+        });
+        onCreate?.("websocket_request", id);
+      },
+    },
     ...((hideFolder
       ? []
       : [

@@ -94,7 +94,11 @@ const collapsedFamily = atomFamily((treeId: string) => {
   return atomWithKVStorage<Record<string, boolean>>(key, {});
 });
 
+type SidebarSortMode = "manual" | "name" | "url";
+const sidebarSortAtom = atomWithKVStorage<SidebarSortMode>("sidebar_sort", "manual");
+
 type SidebarModel = Workspace | Folder | HttpRequest | GrpcRequest | WebsocketRequest;
+type SidebarChildModel = Exclude<SidebarModel, Workspace>;
 function isSidebarLeafModel(m: AnyModel): boolean {
   const modelMap: Record<Exclude<SidebarModel["model"], "workspace">, null> = {
     http_request: null,
@@ -112,6 +116,7 @@ function Sidebar({ className }: { className?: string }) {
   const activeWorkspaceId = useAtomValue(activeWorkspaceAtom)?.id;
   const treeId = `tree.${activeWorkspaceId ?? "unknown"}`;
   const filterText = useAtomValue(sidebarFilterAtom);
+  const sortMode = useAtomValue(sidebarSortAtom);
   const [tree, allFields, emptyFilterSuggestions] = useAtomValue(sidebarTreeAtom) ?? [];
 
   const wrapperRef = useRef<HTMLElement>(null);
@@ -659,6 +664,28 @@ function Sidebar({ className }: { className?: string }) {
                   hotKeyAction: "sidebar.collapse_all",
                   hotKeyLabelOnly: true,
                 },
+                { type: "separator" },
+                {
+                  label: "Sort",
+                  leftSlot: <Icon icon="arrow_up_down" />,
+                  submenu: [
+                    {
+                      label: "Manual Order",
+                      leftSlot: sortMode === "manual" ? <Icon icon="check" /> : undefined,
+                      onSelect: () => jotaiStore.set(sidebarSortAtom, "manual"),
+                    },
+                    {
+                      label: "Name",
+                      leftSlot: sortMode === "name" ? <Icon icon="check" /> : undefined,
+                      onSelect: () => jotaiStore.set(sidebarSortAtom, "name"),
+                    },
+                    {
+                      label: "Interface URL",
+                      leftSlot: sortMode === "url" ? <Icon icon="check" /> : undefined,
+                      onSelect: () => jotaiStore.set(sidebarSortAtom, "url"),
+                    },
+                  ],
+                },
               ]}
             >
               <IconButton
@@ -882,12 +909,46 @@ const sidebarSuggestionFieldOrder = [
   "name",
 ];
 
+function compareSidebarItems(a: SidebarChildModel, b: SidebarChildModel, sortMode: SidebarSortMode) {
+  if (sortMode === "manual") {
+    return compareSidebarItemsManual(a, b);
+  }
+
+  if (sortMode === "url") {
+    const aIsFolder = a.model === "folder";
+    const bIsFolder = b.model === "folder";
+    if (aIsFolder !== bIsFolder) {
+      return aIsFolder ? -1 : 1;
+    }
+  }
+
+  const aValue = sortMode === "name" ? resolvedModelName(a) : "url" in a ? a.url : a.name;
+  const bValue = sortMode === "name" ? resolvedModelName(b) : "url" in b ? b.url : b.name;
+  const result = aValue.localeCompare(bValue, undefined, {
+    numeric: true,
+    sensitivity: "base",
+  });
+  return result === 0 ? compareSidebarItemsManual(a, b) : result;
+}
+
+function compareSidebarItemsManual(a: SidebarChildModel, b: SidebarChildModel) {
+  if (a.sortPriority !== b.sortPriority) {
+    return a.sortPriority - b.sortPriority;
+  }
+  // Keep equal-priority items in a stable order when they are edited.
+  if (a.createdAt !== b.createdAt) {
+    return a.createdAt > b.createdAt ? 1 : -1;
+  }
+  return a.id === b.id ? 0 : a.id > b.id ? 1 : -1;
+}
+
 const sidebarTreeAtom = atom<
   [TreeNode<SidebarModel>, FieldDef[], SidebarFilterSuggestion[]] | null
 >((get) => {
   const allModels = get(memoAllPotentialChildrenAtom);
   const activeWorkspace = get(activeWorkspaceAtom);
   const filter = get(sidebarFilterAtom);
+  const sortMode = get(sidebarSortAtom);
 
   const childrenMap: Record<string, Exclude<SidebarModel, Workspace>[]> = {};
   for (const item of allModels) {
@@ -916,6 +977,7 @@ const sidebarTreeAtom = atom<
     const fields = getItemFields(node);
     const model = node.item.model;
     const isLeafNode = !(model === "folder" || model === "workspace");
+    node.draggable = sortMode === "manual";
 
     for (const [field, value] of Object.entries(fields)) {
       if (!value) continue;
@@ -940,16 +1002,7 @@ const sidebarTreeAtom = atom<
     node.children = !isLeafNode ? [] : undefined;
 
     if (node.children != null) {
-      childItems.sort((a, b) => {
-        if (a.sortPriority !== b.sortPriority) {
-          return a.sortPriority - b.sortPriority;
-        }
-        // Keep equal-priority items in a stable order when they are edited.
-        if (a.createdAt !== b.createdAt) {
-          return a.createdAt > b.createdAt ? 1 : -1;
-        }
-        return a.id === b.id ? 0 : a.id > b.id ? 1 : -1;
-      });
+      childItems.sort((a, b) => compareSidebarItems(a, b, sortMode));
 
       for (const item of childItems) {
         const childNode = { item, parent: node, depth };
@@ -1063,12 +1116,16 @@ function getItemKey(item: SidebarModel) {
   const url = "url" in item ? item.url : "n/a";
   const method = "method" in item ? item.method : "n/a";
   const service = "service" in item ? item.service : "n/a";
+  const protocol = "protocol" in item ? item.protocol : "n/a";
+  const sortMode = jotaiStore.get(sidebarSortAtom);
   return [
     item.id,
     item.name,
     url,
     method,
     service,
+    protocol,
+    sortMode,
     latestResponse?.elapsed,
     latestResponse?.id ?? "n/a",
   ].join("::");
@@ -1088,12 +1145,35 @@ const SidebarLeftSlot = memo(function SidebarLeftSlot({
     return null;
   }
   const isSelected = jotaiStore.get(isSelectedFamily({ treeId, itemId: item.id }));
+  const requestType =
+    item.model === "http_request"
+      ? { label: "HTTP", className: "text-primary" }
+      : item.model === "grpc_request"
+        ? { label: "gRPC", className: "text-info" }
+        : item.protocol === "stomp"
+          ? { label: "STOMP", className: "text-warning" }
+          : { label: "WebSocket", className: "text-success" };
+
   return (
-    <HttpMethodTag
-      short
-      className={classNames("text-xs pl-1.5", !isSelected && OPACITY_SUBTLE)}
-      request={item}
-    />
+    <>
+      <span
+        title={`${requestType.label} request`}
+        className={classNames(
+          "ml-1.5 shrink-0 whitespace-nowrap rounded-sm border border-current/20 bg-current/10 px-1 py-0.5 font-mono text-4xs leading-none",
+          requestType.className,
+          !isSelected && OPACITY_SUBTLE,
+        )}
+      >
+        {requestType.label}
+      </span>
+      {item.model === "http_request" && (
+        <HttpMethodTag
+          short
+          className={classNames("text-xs", !isSelected && OPACITY_SUBTLE)}
+          request={item}
+        />
+      )}
+    </>
   );
 });
 
@@ -1120,20 +1200,40 @@ const SidebarInnerItem = memo(function SidebarInnerItem({
     ),
   );
 
+  const isHttpRequest = item.model === "http_request";
+  const name = isHttpRequest ? item.name.trim() : "";
+  const address = isHttpRequest ? item.url.trim() || resolvedModelName(item) : "";
+
   return (
     <div className="flex items-center gap-2 min-w-0 h-full w-full text-left">
       <div
         className={classNames(
-          "truncate",
+          isHttpRequest
+            ? "grid min-w-0 flex-1 grid-cols-[minmax(0,2fr)_minmax(0,3fr)] items-center gap-3"
+            : "truncate flex-1",
           gitStatus === "modified" && "text-info",
           gitStatus === "untracked" && "text-success",
           gitStatus === "removed" && "text-danger",
         )}
       >
-        {resolvedModelName(item)}
+        {isHttpRequest ? (
+          <>
+            <span
+              className={classNames("truncate", !name && "text-text-subtlest")}
+              title={name || undefined}
+            >
+              {name || "—"}
+            </span>
+            <span className="truncate text-right" title={address}>
+              {address}
+            </span>
+          </>
+        ) : (
+          resolvedModelName(item)
+        )}
       </div>
       {response != null && (
-        <div className="ml-auto">
+        <div>
           {response.state !== "closed" ? (
             <LoadingIcon size="sm" className="text-text-subtlest" />
           ) : response.model === "http_response" ? (
@@ -1165,7 +1265,9 @@ function getItemFields(node: TreeNode<SidebarModel>): Record<string, string> {
 
   fields.type = "http";
   if (item.model === "grpc_request") fields.type = "grpc";
-  else if (item.model === "websocket_request") fields.type = "ws";
+  else if (item.model === "websocket_request") {
+    fields.type = item.protocol === "stomp" ? "stomp" : "ws";
+  }
 
   if (node.parent?.item.model === "folder") {
     fields.folder = node.parent.item.name;

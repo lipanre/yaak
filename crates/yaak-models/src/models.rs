@@ -993,6 +993,8 @@ pub struct Environment {
     /// Variables defined in this environment scope.
     /// Child environments override parent variables by name.
     pub variables: Vec<EnvironmentVariable>,
+    /// Prefix prepended to relative request URLs while this environment is active.
+    pub request_prefix: String,
     pub color: Option<String>,
     pub sort_priority: f64,
 }
@@ -1034,6 +1036,7 @@ impl UpsertModelInfo for Environment {
             (Public, self.public.into()),
             (SortPriority, self.sort_priority.into()),
             (Variables, serde_json::to_string(&self.variables)?.into()),
+            (RequestPrefix, self.request_prefix.into()),
         ])
     }
 
@@ -1046,6 +1049,7 @@ impl UpsertModelInfo for Environment {
             EnvironmentIden::Name,
             EnvironmentIden::Public,
             EnvironmentIden::Variables,
+            EnvironmentIden::RequestPrefix,
             EnvironmentIden::SortPriority,
         ]
     }
@@ -1069,6 +1073,7 @@ impl UpsertModelInfo for Environment {
             name: row.get("name")?,
             public: row.get("public")?,
             variables: serde_json::from_str(variables.as_str()).unwrap_or_default(),
+            request_prefix: row.get("request_prefix")?,
             sort_priority: row.get("sort_priority")?,
 
             // Deprecated field, but we need to keep it around for a couple of versions
@@ -1634,6 +1639,20 @@ impl Default for WebsocketMessageType {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Eq, PartialEq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "gen_models.ts")]
+pub enum WebsocketRequestProtocol {
+    Websocket,
+    Stomp,
+}
+
+impl Default for WebsocketRequestProtocol {
+    fn default() -> Self {
+        Self::Websocket
+    }
+}
+
 impl Default for WebsocketRequest {
     fn default() -> Self {
         Self {
@@ -1649,7 +1668,10 @@ impl Default for WebsocketRequest {
             headers: Vec::new(),
             message: String::new(),
             name: String::new(),
+            protocol: WebsocketRequestProtocol::default(),
             sort_priority: 0.0,
+            stomp_destination: String::new(),
+            stomp_subscriptions: Vec::new(),
             url: String::new(),
             url_parameters: Vec::new(),
             setting_send_cookies: InheritedBoolSetting::default(),
@@ -1683,7 +1705,10 @@ pub struct WebsocketRequest {
     pub headers: Vec<HttpRequestHeader>,
     pub message: String,
     pub name: String,
+    pub protocol: WebsocketRequestProtocol,
     pub sort_priority: f64,
+    pub stomp_destination: String,
+    pub stomp_subscriptions: Vec<String>,
     pub url: String,
     /// URL parameters used for both path placeholders (`:id`) and query string entries.
     pub url_parameters: Vec<HttpUrlParameter>,
@@ -1730,7 +1755,10 @@ impl UpsertModelInfo for WebsocketRequest {
             (Headers, serde_json::to_string(&self.headers)?.into()),
             (Message, self.message.into()),
             (Name, self.name.trim().into()),
+            (Protocol, serde_json::to_value(&self.protocol)?.as_str().into()),
             (SortPriority, self.sort_priority.into()),
+            (StompDestination, self.stomp_destination.into()),
+            (StompSubscriptions, serde_json::to_string(&self.stomp_subscriptions)?.into()),
             (Url, self.url.into()),
             (UrlParameters, serde_json::to_string(&self.url_parameters)?.into()),
             (SettingSendCookies, serde_json::to_string(&self.setting_send_cookies)?.into()),
@@ -1757,7 +1785,10 @@ impl UpsertModelInfo for WebsocketRequest {
             WebsocketRequestIden::Headers,
             WebsocketRequestIden::Message,
             WebsocketRequestIden::Name,
+            WebsocketRequestIden::Protocol,
             WebsocketRequestIden::SortPriority,
+            WebsocketRequestIden::StompDestination,
+            WebsocketRequestIden::StompSubscriptions,
             WebsocketRequestIden::Url,
             WebsocketRequestIden::UrlParameters,
             WebsocketRequestIden::SettingSendCookies,
@@ -1778,6 +1809,8 @@ impl UpsertModelInfo for WebsocketRequest {
         let setting_store_cookies: String = row.get("setting_store_cookies")?;
         let setting_validate_certificates: String = row.get("setting_validate_certificates")?;
         let setting_request_message_size: String = row.get("setting_request_message_size")?;
+        let protocol: String = row.get("protocol")?;
+        let stomp_subscriptions: String = row.get("stomp_subscriptions")?;
         Ok(Self {
             id: row.get("id")?,
             model: row.get("model")?,
@@ -1794,6 +1827,10 @@ impl UpsertModelInfo for WebsocketRequest {
             headers: serde_json::from_str(headers.as_str()).unwrap_or_default(),
             folder_id: row.get("folder_id")?,
             name: row.get("name")?,
+            protocol: serde_json::from_str(format!(r#""{protocol}""#).as_str()).unwrap_or_default(),
+            stomp_destination: row.get("stomp_destination")?,
+            stomp_subscriptions: serde_json::from_str(stomp_subscriptions.as_str())
+                .unwrap_or_default(),
             setting_send_cookies: serde_json::from_str(&setting_send_cookies).unwrap_or_default(),
             setting_store_cookies: serde_json::from_str(&setting_store_cookies).unwrap_or_default(),
             setting_validate_certificates: serde_json::from_str(&setting_validate_certificates)

@@ -22,6 +22,10 @@ export type Environment = {
    * Child environments override parent variables by name.
    */
   variables: Array<EnvironmentVariable>;
+  /**
+   * Prefix prepended to relative request URLs while this environment is active.
+   */
+  requestPrefix: string;
   color: string | null;
   sortPriority: number;
 };
@@ -145,6 +149,8 @@ export type SyncState = {
   syncDir: string;
 };
 
+export type WebsocketRequestProtocol = "websocket" | "stomp";
+
 export type WebsocketRequest = {
   model: "websocket_request";
   id: string;
@@ -158,7 +164,10 @@ export type WebsocketRequest = {
   headers: Array<HttpRequestHeader>;
   message: string;
   name: string;
+  protocol: WebsocketRequestProtocol;
   sortPriority: number;
+  stompDestination: string;
+  stompSubscriptions: Array<string>;
   url: string;
   /**
    * URL parameters used for both path placeholders (`:id`) and query string entries.

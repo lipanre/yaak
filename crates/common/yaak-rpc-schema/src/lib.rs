@@ -872,6 +872,14 @@ pub struct CmdWsConnectReq {
 #[derive(Debug, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "gen_rpc.ts")]
+pub struct CmdStompSubscribeReq {
+    pub connection_id: String,
+    pub environment_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "gen_rpc.ts")]
 pub struct CmdPluginsSearchReq {
     pub query: String,
 }
@@ -1031,6 +1039,7 @@ macro_rules! with_commands {
     cmd_ws_send(CmdWsSendReq) -> WebsocketConnection,
     cmd_ws_close(CmdWsCloseReq) -> WebsocketConnection,
     cmd_ws_connect(CmdWsConnectReq) -> WebsocketConnection,
+    cmd_stomp_subscribe(CmdStompSubscribeReq) -> WebsocketConnection,
     cmd_plugins_search(CmdPluginsSearchReq) -> PluginSearchResponse,
     cmd_plugins_install(CmdPluginsInstallReq) -> (),
     cmd_plugins_install_from_directory(CmdPluginsInstallFromDirectoryReq) -> Plugin,

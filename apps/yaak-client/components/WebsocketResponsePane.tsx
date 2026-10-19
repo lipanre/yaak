@@ -32,6 +32,7 @@ interface Props {
 }
 
 export function WebsocketResponsePane({ activeRequest }: Props) {
+  const isStomp = activeRequest.protocol === "stomp";
   const [showLarge, setShowLarge] = useStateWithDeps<boolean>(false, [activeRequest.id]);
   const [showingLarge, setShowingLarge] = useState<boolean>(false);
   const [hexDumps, setHexDumps] = useState<Record<number, boolean>>({});
@@ -54,7 +55,7 @@ export function WebsocketResponsePane({ activeRequest }: Props) {
         )}
         <WebsocketStatusTag connection={activeConnection} />
         <span>&bull;</span>
-        <span>{events.length} Messages</span>
+        <span>{events.length} {isStomp ? "Frames" : "Messages"}</span>
       </HStack>
       <HStack space={0.5} className="ml-auto">
         <RecentWebsocketConnectionsDropdown
@@ -81,6 +82,7 @@ export function WebsocketResponsePane({ activeRequest }: Props) {
         renderDetail={({ event, index, onClose }) => (
           <WebsocketEventDetail
             event={event}
+            isStomp={isStomp}
             hexDump={hexDumps[index] ?? event.messageType === "binary"}
             setHexDump={(v) => setHexDumps({ ...hexDumps, [index]: v })}
             showLarge={showLarge}
@@ -153,6 +155,7 @@ function WebsocketEventRow({
 
 function WebsocketEventDetail({
   event,
+  isStomp,
   hexDump,
   setHexDump,
   showLarge,
@@ -162,6 +165,7 @@ function WebsocketEventDetail({
   onClose,
 }: {
   event: WebsocketEvent;
+  isStomp: boolean;
   hexDump: boolean;
   setHexDump: (v: boolean) => void;
   showLarge: boolean;
@@ -186,8 +190,8 @@ function WebsocketEventDetail({
       : event.messageType === "open"
         ? "Connection Open"
         : event.messageType === "error"
-          ? "WebSocket Error"
-          : `Message ${event.isServer ? "Received" : "Sent"}`;
+        ? `${isStomp ? "STOMP" : "WebSocket"} Error`
+        : `${isStomp ? "Frame" : "Message"} ${event.isServer ? "Received" : "Sent"}`;
 
   const actions: EventDetailAction[] =
     message !== ""

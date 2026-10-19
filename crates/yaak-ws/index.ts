@@ -41,3 +41,16 @@ export function sendWebsocket({
     environmentId,
   });
 }
+
+export function subscribeStomp({
+  connectionId,
+  environmentId,
+}: {
+  connectionId: string;
+  environmentId: string | null;
+}) {
+  return platform.rpc("cmd_stomp_subscribe", {
+    connectionId,
+    environmentId,
+  });
+}

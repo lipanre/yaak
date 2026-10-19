@@ -2,6 +2,7 @@ mod connect;
 pub mod error;
 pub mod manager;
 pub mod render;
+pub mod stomp;
 
 pub use connect::ws_connect;
 pub use manager::WebsocketManager;

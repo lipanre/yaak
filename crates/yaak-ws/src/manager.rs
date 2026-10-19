@@ -1,6 +1,7 @@
 use crate::connect::{message_size_limit, ws_connect};
 use crate::error::Error::GenericError;
 use crate::error::Result;
+use crate::stomp::frame_command;
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use http::HeaderMap;
@@ -98,6 +99,99 @@ impl WebsocketManager {
         }
         connection.sink.send(msg).await?;
         Ok(())
+    }
+
+    pub async fn connect_stomp(
+        &mut self,
+        id: &str,
+        url: &str,
+        headers: HeaderMap<HeaderValue>,
+        receive_tx: mpsc::Sender<Message>,
+        validate_certificates: bool,
+        client_cert: Option<ClientCertificateConfig>,
+        request_message_size: i32,
+        connect_frame: String,
+        subscribe_frames: Vec<String>,
+    ) -> Result<(Response, Vec<Message>)> {
+        let tx = receive_tx.clone();
+        let max_message_size = message_size_limit(request_message_size);
+
+        let (stream, response) =
+            ws_connect(url, headers, validate_certificates, client_cert, request_message_size)
+                .await?;
+        let (mut write, mut read) = stream.split();
+        write.send(Message::Text(connect_frame.into())).await?;
+
+        let mut initial_messages = Vec::new();
+        let connected = async {
+            loop {
+                match read.next().await {
+                    Some(Ok(message)) => {
+                        initial_messages.push(message.clone());
+                        if let Message::Text(text) = &message {
+                            match frame_command(text) {
+                                "CONNECTED" => break Ok(()),
+                                "ERROR" => {
+                                    break Err(GenericError(format!(
+                                        "STOMP connection failed: {text}"
+                                    )));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    Some(Err(e)) => break Err(GenericError(e.to_string())),
+                    None => {
+                        break Err(GenericError(
+                            "WebSocket closed before STOMP CONNECTED frame".to_string(),
+                        ));
+                    }
+                }
+            }
+        };
+
+        match tokio::time::timeout(Duration::from_secs(10), connected).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                return Err(GenericError(
+                    "Timed out waiting for STOMP CONNECTED frame".to_string(),
+                ));
+            }
+        }
+
+        for frame in subscribe_frames {
+            write.send(Message::Text(frame.into())).await?;
+        }
+
+        self.connections
+            .lock()
+            .await
+            .insert(id.to_string(), WebsocketConnection { max_message_size, sink: write });
+
+        let handle = {
+            let connection_id = id.to_string();
+            let connections = self.connections.clone();
+            let read_tasks = self.read_tasks.clone();
+            tokio::task::spawn(async move {
+                while let Some(msg) = read.next().await {
+                    match msg {
+                        Err(e) => {
+                            warn!("Broken websocket connection: {}", e);
+                            break;
+                        }
+                        Ok(message) => tx.send(message).await.unwrap(),
+                    }
+                }
+                debug!("Connection {} closed", connection_id);
+                connections.lock().await.remove(&connection_id);
+                read_tasks.lock().await.remove(&connection_id);
+            })
+        };
+
+        self.read_tasks.lock().await.insert(id.to_string(), handle);
+
+        Ok((response, initial_messages))
     }
 
     pub async fn close(&mut self, id: &str) -> Result<()> {

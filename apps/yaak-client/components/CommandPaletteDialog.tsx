@@ -126,6 +126,16 @@ export function CommandPaletteDialog({ onClose }: { onClose: () => void }) {
         onSelect: () => createRequestAndNavigate({ model: "websocket_request", workspaceId }),
       },
       {
+        key: "websocket_stomp_request.create",
+        label: "Create WebSocket STOMP Request",
+        onSelect: () =>
+          createRequestAndNavigate({
+            model: "websocket_request",
+            workspaceId,
+            protocol: "stomp",
+          }),
+      },
+      {
         key: "folder.create",
         label: "Create Folder",
         onSelect: () => createFolder.mutate({}),

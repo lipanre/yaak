@@ -6,7 +6,12 @@ import {
   patchModelDebounced,
 } from "@yaakapp-internal/models";
 import type { GenericCompletionOption } from "@yaakapp-internal/plugins";
-import { closeWebsocket, connectWebsocket, sendWebsocket } from "@yaakapp-internal/ws";
+import {
+  closeWebsocket,
+  connectWebsocket,
+  sendWebsocket,
+  subscribeStomp,
+} from "@yaakapp-internal/ws";
 import classNames from "classnames";
 import { atom, useAtomValue } from "jotai";
 import type { CSSProperties } from "react";
@@ -39,6 +44,7 @@ import { countOverriddenSettings, ModelSettingsEditor } from "./ModelSettingsEdi
 import { UrlBar } from "./UrlBar";
 import { UrlParametersEditor } from "./UrlParameterEditor";
 import { languageFromContentType, CountBadge } from "@yaakapp-internal/ui";
+import { StompRequestEditor } from "./StompRequestEditor";
 
 interface Props {
   style: CSSProperties;
@@ -71,6 +77,7 @@ export function WebsocketRequestPane({ style, fullHeight, className, activeReque
   const headersTab = useHeadersTab(TAB_HEADERS, activeRequest);
   const inheritedHeaders = useInheritedHeaders(activeRequest);
   const numSettingsOverrides = countOverriddenSettings(activeRequest);
+  const isStomp = activeRequest.protocol === "stomp";
 
   // Listen for event to focus the params tab (e.g., when clicking a :param in the URL)
   useRequestEditorEvent(
@@ -115,7 +122,11 @@ export function WebsocketRequestPane({ style, fullHeight, className, activeReque
     return [
       {
         value: TAB_MESSAGE,
-        label: "Message",
+        label: isStomp ? "STOMP" : "Message",
+        rightSlot:
+          isStomp && activeRequest.stompSubscriptions.length > 0 ? (
+            <CountBadge count={activeRequest.stompSubscriptions.length} />
+          ) : null,
       } as TabItem,
       {
         value: TAB_PARAMS,
@@ -135,7 +146,15 @@ export function WebsocketRequestPane({ style, fullHeight, className, activeReque
         rightSlot: hasDescription && <CountBadge count={true} />,
       },
     ];
-  }, [authTab, hasDescription, headersTab, numSettingsOverrides, urlParameterPairs.length]);
+  }, [
+    activeRequest.stompSubscriptions.length,
+    authTab,
+    hasDescription,
+    headersTab,
+    isStomp,
+    numSettingsOverrides,
+    urlParameterPairs.length,
+  ]);
 
   const { activeResponse } = usePinnedHttpResponse(activeRequestId);
   const { mutate: cancelResponse } = useCancelHttpResponse(activeResponse?.id ?? null);
@@ -162,6 +181,15 @@ export function WebsocketRequestPane({ style, fullHeight, className, activeReque
     await flushAllModelWrites(); // The backend reads the message from the DB
     await sendWebsocket({
       connectionId: connection?.id,
+      environmentId: getActiveEnvironment()?.id ?? null,
+    });
+  }, [connection]);
+
+  const handleSubscribe = useCallback(async () => {
+    if (connection == null) return;
+    await flushAllModelWrites();
+    await subscribeStomp({
+      connectionId: connection.id,
       environmentId: getActiveEnvironment()?.id ?? null,
     });
   }, [connection]);
@@ -268,17 +296,27 @@ export function WebsocketRequestPane({ style, fullHeight, className, activeReque
               />
             </TabContent>
             <TabContent value={TAB_MESSAGE}>
-              <Editor
-                forceUpdateKey={forceUpdateKey}
-                autocompleteFunctions
-                autocompleteVariables
-                placeholder="..."
-                heightMode={fullHeight ? "full" : "auto"}
-                defaultValue={activeRequest.message}
-                language={messageLanguage}
-                onChange={(message) => patchModelDebounced(activeRequest, { message })}
-                stateKey={`json.${activeRequest.id}`}
-              />
+              {isStomp ? (
+                <StompRequestEditor
+                  request={activeRequest}
+                  fullHeight={fullHeight}
+                  forceUpdateKey={forceUpdateKey}
+                  isConnected={isLoading}
+                  onSubscribe={handleSubscribe}
+                />
+              ) : (
+                <Editor
+                  forceUpdateKey={forceUpdateKey}
+                  autocompleteFunctions
+                  autocompleteVariables
+                  placeholder="..."
+                  heightMode={fullHeight ? "full" : "auto"}
+                  defaultValue={activeRequest.message}
+                  language={messageLanguage}
+                  onChange={(message) => patchModelDebounced(activeRequest, { message })}
+                  stateKey={`json.${activeRequest.id}`}
+                />
+              )}
             </TabContent>
             <TabContent value={TAB_SETTINGS}>
               <ModelSettingsEditor model={activeRequest} />

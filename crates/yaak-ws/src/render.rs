@@ -3,7 +3,9 @@ use log::info;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use yaak_models::models::{Environment, HttpRequestHeader, HttpUrlParameter, WebsocketRequest};
-use yaak_models::render::make_vars_hashmap;
+use yaak_models::render::{
+    join_request_prefix, make_vars_hashmap, request_prefix_from_environment_chain,
+};
 use yaak_templates::{RenderOptions, TemplateCallback, parse_and_render, render_json_value_raw};
 
 pub async fn render_websocket_request<T: TemplateCallback>(
@@ -12,6 +14,7 @@ pub async fn render_websocket_request<T: TemplateCallback>(
     cb: &T,
     opt: &RenderOptions,
 ) -> Result<WebsocketRequest> {
+    let request_prefix = request_prefix_from_environment_chain(&environment_chain).to_string();
     let vars = &make_vars_hashmap(environment_chain);
 
     let mut url_parameters = Vec::new();
@@ -73,8 +76,25 @@ pub async fn render_websocket_request<T: TemplateCallback>(
     };
 
     let url = parse_and_render(r.url.as_str(), vars, cb, opt).await?;
+    let prefix = parse_and_render(&request_prefix, vars, cb, opt).await?;
+    let url = join_request_prefix(&prefix, &url);
+
+    let mut stomp_subscriptions = Vec::new();
+    for destination in r.stomp_subscriptions.clone() {
+        stomp_subscriptions.push(parse_and_render(&destination, vars, cb, opt).await?)
+    }
+    let stomp_destination = parse_and_render(&r.stomp_destination, vars, cb, opt).await?;
 
     let message = parse_and_render(&r.message.clone(), vars, cb, opt).await?;
 
-    Ok(WebsocketRequest { url, url_parameters, headers, authentication, message, ..r.to_owned() })
+    Ok(WebsocketRequest {
+        url,
+        url_parameters,
+        headers,
+        authentication,
+        message,
+        stomp_destination,
+        stomp_subscriptions,
+        ..r.to_owned()
+    })
 }

@@ -13,6 +13,45 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use yaak_templates::{RenderOptions, TemplateCallback, parse_and_render, render_json_value_raw};
 
+/// The most specific environment prefix in a resolved environment chain.
+pub fn request_prefix_from_environment_chain(environment_chain: &[Environment]) -> &str {
+    environment_chain
+        .iter()
+        .map(|environment| environment.request_prefix.trim())
+        .find(|prefix| !prefix.is_empty())
+        .unwrap_or_default()
+}
+
+/// Prepend an environment request prefix to a relative URL.
+pub fn join_request_prefix(prefix: &str, url: &str) -> String {
+    let prefix = prefix.trim();
+    let url = url.trim();
+    if prefix.is_empty() || url.is_empty() || is_absolute_url(url) {
+        return url.to_string();
+    }
+
+    let prefix = prefix.trim_end_matches('/');
+    if url.starts_with('?') || url.starts_with('#') {
+        return format!("{prefix}{url}");
+    }
+
+    let url = url.trim_start_matches('/');
+    if url.is_empty() { format!("{prefix}/") } else { format!("{prefix}/{url}") }
+}
+
+fn is_absolute_url(url: &str) -> bool {
+    if url.starts_with("//") {
+        return true;
+    }
+
+    let Some(colon_index) = url.find(':') else {
+        return false;
+    };
+    let scheme = &url[..colon_index];
+    !scheme.is_empty()
+        && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
 /// Render every template in an HTTP request against an environment chain.
 pub async fn render_http_request<T: TemplateCallback>(
     request: &HttpRequest,
@@ -20,6 +59,7 @@ pub async fn render_http_request<T: TemplateCallback>(
     callback: &T,
     options: &RenderOptions,
 ) -> yaak_templates::error::Result<HttpRequest> {
+    let request_prefix = request_prefix_from_environment_chain(&environment_chain).to_string();
     let vars = &make_vars_hashmap(environment_chain);
 
     let mut url_parameters = Vec::new();
@@ -92,6 +132,8 @@ pub async fn render_http_request<T: TemplateCallback>(
     };
 
     let url = parse_and_render(request.url.clone().as_str(), vars, callback, options).await?;
+    let prefix = parse_and_render(&request_prefix, vars, callback, options).await?;
+    let url = join_request_prefix(&prefix, &url);
     let (url, url_parameters) = apply_path_placeholders(&url, &url_parameters);
 
     Ok(HttpRequest { url, url_parameters, headers, body, authentication, ..request.to_owned() })
@@ -103,6 +145,7 @@ pub async fn render_grpc_request<T: TemplateCallback>(
     cb: &T,
     opt: &RenderOptions,
 ) -> yaak_templates::error::Result<GrpcRequest> {
+    let request_prefix = request_prefix_from_environment_chain(&environment_chain).to_string();
     let vars = &make_vars_hashmap(environment_chain);
 
     let mut metadata = Vec::new();
@@ -151,6 +194,8 @@ pub async fn render_grpc_request<T: TemplateCallback>(
     };
 
     let url = parse_and_render(r.url.as_str(), vars, cb, opt).await?;
+    let prefix = parse_and_render(&request_prefix, vars, cb, opt).await?;
+    let url = join_request_prefix(&prefix, &url);
 
     Ok(GrpcRequest { url, metadata, authentication, ..r.to_owned() })
 }
@@ -246,5 +291,48 @@ mod tests {
         let input = json!("just a string");
         let result = strip_disabled_form_entries(input.clone());
         assert_eq!(result, input);
+    }
+
+    #[test]
+    fn request_prefix_joins_relative_urls_with_one_slash() {
+        assert_eq!(
+            join_request_prefix("https://www.example.com/api", "/test"),
+            "https://www.example.com/api/test"
+        );
+        assert_eq!(
+            join_request_prefix("https://www.example.com/api/", "test"),
+            "https://www.example.com/api/test"
+        );
+    }
+
+    #[test]
+    fn request_prefix_does_not_replace_absolute_urls() {
+        assert_eq!(
+            join_request_prefix("https://www.example.com/api", "https://other.example.com/test"),
+            "https://other.example.com/test"
+        );
+        assert_eq!(
+            join_request_prefix("https://www.example.com/api", "//other.example.com/test"),
+            "//other.example.com/test"
+        );
+    }
+
+    #[test]
+    fn request_prefix_uses_first_non_empty_environment_prefix() {
+        let environment_chain = vec![
+            Environment { request_prefix: "  ".into(), ..Default::default() },
+            Environment {
+                request_prefix: "https://staging.example.com/api".into(),
+                ..Default::default()
+            },
+            Environment {
+                request_prefix: "https://base.example.com/api".into(),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(
+            request_prefix_from_environment_chain(&environment_chain),
+            "https://staging.example.com/api"
+        );
     }
 }

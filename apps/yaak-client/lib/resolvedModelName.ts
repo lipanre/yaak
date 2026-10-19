@@ -23,7 +23,9 @@ export function resolvedModelName(r: AnyModel | null): string {
         ? "GraphQL Request"
         : "HTTP Request"
       : r.model === "websocket_request"
-        ? "WebSocket Request"
+        ? r.protocol === "stomp"
+          ? "WebSocket STOMP Request"
+          : "WebSocket Request"
         : "gRPC Request";
   }
 

@@ -20,6 +20,7 @@ import type { PairEditorHandle, PairWithId } from "./core/PairEditor";
 import { ensurePairId } from "./core/PairEditor.util";
 import { PairOrBulkEditor } from "./core/PairOrBulkEditor";
 import { PillButton } from "./core/PillButton";
+import { Input } from "./core/Input";
 import { EnvironmentColorIndicator } from "./EnvironmentColorIndicator";
 import { EnvironmentSharableTooltip } from "./EnvironmentSharableTooltip";
 
@@ -136,6 +137,18 @@ export function EnvironmentEditor({ environment, hideName, className, setRef }: 
             {environment.public ? "Sharable" : "Private"}
           </PillButton>
         </Heading>
+        <Input
+          label="Request Prefix"
+          help="Prepended to relative request URLs while this environment is active."
+          defaultValue={environment.requestPrefix}
+          placeholder="https://www.example.com/api"
+          autocompleteVariables
+          forcedEnvironmentId={environment.id}
+          language={null}
+          wrapLines={false}
+          stateKey={`request-prefix.${environment.id}`}
+          onChange={(requestPrefix) => patchModel(environment, { requestPrefix })}
+        />
         {environment.public && (!isEncryptionEnabled || !allVariableAreEncrypted) && (
           <DismissibleBanner
             id={`warn-unencrypted-${environment.id}`}

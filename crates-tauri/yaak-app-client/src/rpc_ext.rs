@@ -1189,6 +1189,20 @@ async fn cmd_ws_connect<R: Runtime>(
     .await?)
 }
 
+async fn cmd_stomp_subscribe<R: Runtime>(
+    ctx: ClientCtx<R>,
+    req: CmdStompSubscribeReq,
+) -> Result<WebsocketConnection> {
+    Ok(crate::ws_ext::cmd_stomp_subscribe(
+        &req.connection_id,
+        req.environment_id.as_deref(),
+        ctx.window.app_handle().clone(),
+        ctx.window.clone(),
+        ctx.window.app_handle().state::<Mutex<WebsocketManager>>(),
+    )
+    .await?)
+}
+
 async fn cmd_plugins_search<R: Runtime>(
     ctx: ClientCtx<R>,
     req: CmdPluginsSearchReq,
