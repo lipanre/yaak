@@ -1,16 +1,21 @@
-name: Build Main Installers
+name: Build Tag Installers
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - "v*"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing v* tag to build and publish
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: build-main-installers-${{ github.ref }}
+  group: build-tag-installers-${{ inputs.release_tag || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -19,8 +24,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - name: Validate release tag
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          if [[ "$RELEASE_TAG" != v* ]]; then
+            echo "::error::Release tag must start with v, got: $RELEASE_TAG"
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@v1
@@ -84,6 +100,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@v1
@@ -149,14 +167,13 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: main-build-${{ github.run_number }}
-          target_commitish: ${{ github.sha }}
-          name: "Yaak main build #${{ github.run_number }}"
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
+          name: "Yaak ${{ inputs.release_tag || github.ref_name }}"
           body: |
-            Automated build from `${{ github.sha }}`.
+            Automated build from `${{ inputs.release_tag || github.ref_name }}`.
 
             Triggered by @${{ github.actor }}.
-          prerelease: true
+          prerelease: ${{ contains(inputs.release_tag || github.ref_name, '-') }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: release-assets/*
