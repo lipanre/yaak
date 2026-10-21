@@ -750,7 +750,7 @@ function Sidebar({ className }: { className?: string }) {
           renderContextMenu={renderContextMenuFn}
           onActivate={handleActivate}
           getEditOptions={getEditOptions}
-          className="pl-2 pr-3 pt-2 pb-2 [&_.tree-item:has(.request-row)]:h-lg!"
+          className="pl-2 pr-3 pt-2 pb-2 [&_.tree-item:has(.request-row)]:h-[calc(var(--height-lg)_+_5px)]!"
           onDragEnd={handleDragEnd}
         />
       )}
