@@ -341,8 +341,11 @@ impl PluginManager {
         };
         let plugin_handle = PluginHandle::new(&plugin.directory, plugin.enabled, tx.clone())?;
         let dir_path = Path::new(&plugin.directory);
-        let is_vendored = dir_path.starts_with(self.vendored_plugin_dir.as_path());
-        let is_installed = dir_path.starts_with(self.installed_plugin_dir.as_path());
+        let watch = plugin_should_watch(
+            dir_path,
+            self.vendored_plugin_dir.as_path(),
+            self.installed_plugin_dir.as_path(),
+        );
 
         // Boot the plugin if it's enabled
         if plugin.enabled {
@@ -352,7 +355,7 @@ impl PluginManager {
                     &plugin_handle,
                     &InternalEventPayload::BootRequest(BootRequest {
                         dir: plugin.directory.clone(),
-                        watch: !is_vendored && !is_installed,
+                        watch,
                     }),
                     Duration::from_secs(5),
                 )
@@ -1176,6 +1179,28 @@ fn is_removed_bundled_plugin_dir(dir: &str) -> bool {
     REMOVED_BUNDLED_PLUGIN_DIRS.contains(&name)
 }
 
+fn plugin_should_watch(
+    dir: &Path,
+    vendored_plugin_dir: &Path,
+    installed_plugin_dir: &Path,
+) -> bool {
+    !path_is_within(dir, vendored_plugin_dir) && !path_is_within(dir, installed_plugin_dir)
+}
+
+fn path_is_within(path: &Path, parent: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        // Tauri resource paths may retain a verbatim prefix (`\\?\C:\...`), while
+        // plugin directories are simplified for Node.js. Compare them in the same
+        // representation so bundled plugins are not mistaken for filesystem plugins.
+        dunce::simplified(path).starts_with(dunce::simplified(parent))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        path.starts_with(parent)
+    }
+}
+
 async fn read_plugins_dir(dir: &PathBuf) -> Result<Vec<String>> {
     let mut result = read_dir(dir).await?;
     let mut dirs: Vec<String> = vec![];
@@ -1205,6 +1230,10 @@ fn fix_windows_paths(p: &PathBuf) -> String {
 #[cfg(test)]
 mod tests {
     use super::is_removed_bundled_plugin_dir;
+    #[cfg(windows)]
+    use super::plugin_should_watch;
+    #[cfg(windows)]
+    use std::path::Path;
 
     #[test]
     fn ignores_removed_bundled_plugins() {
@@ -1228,5 +1257,22 @@ mod tests {
         assert!(!is_removed_bundled_plugin_dir("vendored/plugins/importer-curl"));
         // Must match the whole directory name, not a substring
         assert!(!is_removed_bundled_plugin_dir("vendored/plugins/my-exporter-curl"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn does_not_watch_plugins_in_managed_directories() {
+        let vendored_root = Path::new(r"\\?\C:\Users\me\AppData\Local\Yaak\vendored\plugins");
+        let installed_root = Path::new(r"\\?\C:\Users\me\AppData\Local\Yaak\installed-plugins");
+        let bundled_plugin =
+            Path::new(r"C:/Users/me/AppData/Local/Yaak/vendored/plugins/auth-basic");
+        let installed_plugin =
+            Path::new(r"C:/Users/me/AppData/Local/Yaak/installed-plugins/yaak-auth");
+
+        assert!(!plugin_should_watch(bundled_plugin, vendored_root, installed_root));
+        assert!(!plugin_should_watch(installed_plugin, vendored_root, installed_root));
+        assert!(
+            plugin_should_watch(Path::new(r"C:/dev/my-plugin"), vendored_root, installed_root,)
+        );
     }
 }
