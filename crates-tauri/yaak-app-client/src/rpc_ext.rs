@@ -517,8 +517,14 @@ async fn cmd_import_data<R: Runtime>(
     ctx: ClientCtx<R>,
     req: CmdImportDataReq,
 ) -> Result<ImportPlan> {
-    Ok(crate::cmd_import_data(ctx.window.clone(), &req.file_paths, &req.urls, req.destination)
-        .await?)
+    Ok(crate::cmd_import_data(
+        ctx.window.clone(),
+        &req.file_paths,
+        &req.urls,
+        req.destination,
+        req.mode,
+    )
+    .await?)
 }
 
 async fn cmd_commit_import<R: Runtime>(

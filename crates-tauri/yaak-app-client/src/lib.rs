@@ -40,7 +40,9 @@ use yaak_models::models::{
     CookieJar, Environment, GrpcConnection, GrpcConnectionState, GrpcEvent, GrpcEventType,
     HttpRequest, HttpResponse, HttpResponseState, Workspace,
 };
-use yaak_models::util::{BatchUpsertResult, ImportDestination, ImportPlan, UpdateSource};
+use yaak_models::util::{
+    BatchUpsertResult, ImportDestination, ImportMode, ImportPlan, UpdateSource,
+};
 use yaak_plugins::events::{
     Color, ErrorResponse, FilterResponse, InternalEvent, InternalEventPayload, PluginContext,
     RenderPurpose, ShowToastRequest,
@@ -1045,8 +1047,9 @@ async fn cmd_import_data<R: Runtime>(
     file_paths: &[String],
     urls: &[String],
     destination: ImportDestination,
+    mode: ImportMode,
 ) -> YaakResult<ImportPlan> {
-    plan_import_data(&window, file_paths, urls, destination).await
+    plan_import_data(&window, file_paths, urls, destination, mode).await
 }
 
 async fn cmd_commit_import<R: Runtime>(

@@ -1,5 +1,6 @@
 import {
   type ImportDestination,
+  type ImportMode,
   type ImportPlan,
   type ImportPlanItem,
   type ImportSource,
@@ -28,7 +29,11 @@ import { pluralize } from "@yaakapp-internal/lib/pluralize";
 interface Props {
   currentWorkspace: Workspace | null;
   workspaces: Workspace[];
-  planSources: (sources: ImportSourcePath[], destination: ImportDestination) => Promise<ImportPlan>;
+  planSources: (
+    sources: ImportSourcePath[],
+    destination: ImportDestination,
+    mode: ImportMode,
+  ) => Promise<ImportPlan>;
   detectSource: (source: ImportSourcePath) => Promise<string>;
   listSources: (workspaceId: string) => Promise<ImportSource[]>;
   findSourcesForOrigin: (args: { filePath?: string; url?: string }) => Promise<ImportSource[]>;
@@ -84,6 +89,7 @@ function LoadedImportDataDialog({
   const [destinationChoice, setDestinationChoice] = useState<"new" | "current" | "other" | null>(
     null,
   );
+  const [importMode, setImportMode] = useState<ImportMode>("full");
   const [otherWorkspaceId, setOtherWorkspaceId] = useState<string | null>(null);
   const [originSources, setOriginSources] = useState<ImportSource[]>(initialSources);
   const initialPaths = useMemo(
@@ -196,7 +202,7 @@ function LoadedImportDataDialog({
     setIsLoading(true);
     setSourceError(null);
     try {
-      const nextPlan = await planSources(sources, destination());
+      const nextPlan = await planSources(sources, destination(), importMode);
       setPlan(nextPlan);
       setItems(nextPlan.items);
     } catch (err) {
@@ -222,7 +228,7 @@ function LoadedImportDataDialog({
   // say which of those are destructive. Checking anything also brings back the folders it needs
   // to live in.
   const toggleNode = (node: CheckboxTreeNode<TreeRow>, checked: boolean) => {
-    const targets = new Set(togglableItems(node).map((i) => i.modelId));
+    const targets = new Set(togglableItems(node, importMode).map((i) => i.modelId));
     if (checked && node.data.kind === "item") {
       const byId = new Map(items.map((i) => [i.modelId, i]));
       for (const ancestor of ancestorsOf(node.data.item, byId)) {
@@ -252,6 +258,14 @@ function LoadedImportDataDialog({
     }
     return disabled;
   }, [items]);
+
+  const readOnlyIds = useMemo(
+    () =>
+      new Set(
+        items.filter((item) => !isMutableInMode(item, importMode)).map((item) => item.modelId),
+      ),
+    [items, importMode],
+  );
 
   if (plan != null) {
     const unchanged = items.filter((i) => i.action === "unchanged");
@@ -331,6 +345,10 @@ function LoadedImportDataDialog({
         <VStack space={4} className="pb-4">
           <div className="rounded-lg border border-border-subtle divide-y divide-border-subtle">
             <PreviewRow label="Detected format" value={plan.importer} />
+            <PreviewRow
+              label="Import mode"
+              value={importMode === "full" ? "Full import" : "Append only"}
+            />
             <PreviewRow label={destinationLabel} value={destinationValue} />
           </div>
 
@@ -366,9 +384,9 @@ function LoadedImportDataDialog({
             <div key={root.key} className="rounded-lg border border-border-subtle px-3 py-2">
               <CheckboxTree
                 node={root}
-                checked={nodeCheckedStatus}
+                checked={(n) => nodeCheckedStatus(n, importMode)}
                 onCheck={toggleNode}
-                isCheckboxDisabled={(n) => disabledIds.has(n.key)}
+                isCheckboxDisabled={(n) => disabledIds.has(n.key) || readOnlyIds.has(n.key)}
                 isCollapsedByDefault={(n) =>
                   (n.data.kind === "destination" && workspaceRoots.length > 1) ||
                   (n.data.kind === "item" && n.data.item.action === "ignored")
@@ -378,7 +396,11 @@ function LoadedImportDataDialog({
                   (n.data.kind === "item" && n.data.item.action !== "unchanged")
                 }
                 renderRow={(n) => (
-                  <ImportTreeRow row={n.data} onResolveConflict={resolveConflict} />
+                  <ImportTreeRow
+                    row={n.data}
+                    mode={importMode}
+                    onResolveConflict={resolveConflict}
+                  />
                 )}
               />
             </div>
@@ -456,6 +478,23 @@ function LoadedImportDataDialog({
     </HStack>
   );
 
+  const importModePicker = (
+    <Select
+      name="import-mode"
+      label="Mode"
+      labelPosition="left"
+      size="sm"
+      disabled={isLoading}
+      help="Full import replaces the destination workspace's HTTP requests. Append only adds requests that are not already linked to this source."
+      value={importMode}
+      onChange={setImportMode}
+      options={[
+        { value: "full", label: "Full import" },
+        { value: "append", label: "Append only" },
+      ]}
+    />
+  );
+
   return (
     <>
       <VStack space={4} className="h-full pb-4">
@@ -495,7 +534,12 @@ function LoadedImportDataDialog({
         )}
       </VStack>
       <DialogFooter
-        leftSlot={destinationPicker}
+        leftSlot={
+          <HStack space={4} alignItems="center">
+            {importModePicker}
+            {destinationPicker}
+          </HStack>
+        }
         actions={[
           { label: "Cancel", disabled: isLoading, onClick: cancel },
           {
@@ -517,9 +561,11 @@ function LoadedImportDataDialog({
 
 function ImportTreeRow({
   row,
+  mode,
   onResolveConflict,
 }: {
   row: TreeRow;
+  mode: ImportMode;
   onResolveConflict: (modelId: string, resolution: "keep_mine" | "take_source") => void;
 }) {
   if (row.kind !== "item") {
@@ -537,18 +583,18 @@ function ImportTreeRow({
   }
 
   const { item } = row;
-  const label = actionLabel(item);
+  const label = actionLabel(item, mode);
   return (
     <>
       <div className="truncate flex-1">{item.name}</div>
-      {item.action === "conflict" ? (
+      {item.action === "conflict" && mode === "full" ? (
         <div className="shrink-0">
           <SegmentedControl
             name={`conflict-${item.modelId}`}
             label={`Resolve conflict for ${item.name}`}
             hideLabel
             size="2xs"
-            help={actionHelp(item)}
+            help={actionHelp(item, mode)}
             value={item.resolution ?? "keep_mine"}
             onChange={(v) => onResolveConflict(item.modelId, v)}
             options={[
@@ -559,7 +605,7 @@ function ImportTreeRow({
         </div>
       ) : (
         label != null && (
-          <ActionChip label={label} help={actionHelp(item)} color={actionColor(item)} />
+          <ActionChip label={label} help={actionHelp(item, mode)} color={actionColor(item, mode)} />
         )
       )}
     </>
@@ -583,7 +629,10 @@ function ActionChip({
   );
 }
 
-function actionColor(item: ImportPlanItem): ComponentProps<typeof Chip>["color"] {
+function actionColor(item: ImportPlanItem, mode: ImportMode): ComponentProps<typeof Chip>["color"] {
+  if (mode === "append" && ["update", "keep_local", "conflict", "delete"].includes(item.action)) {
+    return "warning";
+  }
   switch (item.action) {
     case "create":
       return "success";
@@ -600,7 +649,13 @@ function actionColor(item: ImportPlanItem): ComponentProps<typeof Chip>["color"]
   }
 }
 
-function actionLabel(item: ImportPlanItem): string | null {
+function actionLabel(item: ImportPlanItem, mode: ImportMode): string | null {
+  if (mode === "append" && item.action === "delete") {
+    return "source removed";
+  }
+  if (mode === "append" && ["update", "keep_local", "conflict"].includes(item.action)) {
+    return "differs";
+  }
   switch (item.action) {
     case "create":
       return "new";
@@ -617,7 +672,7 @@ function actionLabel(item: ImportPlanItem): string | null {
   }
 }
 
-function actionHelp(item: ImportPlanItem): string | null {
+function actionHelp(item: ImportPlanItem, mode: ImportMode): string | null {
   const help = (text: string) =>
     item.changedFields.length > 0
       ? `${text} · ${item.changedFields.map(fieldLabel).join(", ")}`
@@ -628,13 +683,27 @@ function actionHelp(item: ImportPlanItem): string | null {
     case "update":
       return item.reason === "moved_into_ignored_folder"
         ? "Moved into a folder that isn't imported. Importing that folder brings it along"
-        : help("Changed in the source since the last import");
+        : help(
+            mode === "append"
+              ? "Parameters differ from this source. Append mode keeps the existing request unchanged"
+              : "Changed in the source since the last import",
+          );
     case "delete":
-      return "Gone from the source since the last import. Checking it deletes it here";
+      return mode === "append"
+        ? "Gone from this source. Append mode keeps the existing request unchanged"
+        : "Gone from the source since the last import. Checking it deletes it here";
     case "keep_local":
-      return help("Changed here since the last import. Checking it reverts to the source");
+      return help(
+        mode === "append"
+          ? "Parameters differ from this source. Append mode keeps the existing request unchanged"
+          : "Changed here since the last import. Checking it reverts to the source",
+      );
     case "conflict":
-      return help("Changed here and in the source since the last import");
+      return help(
+        mode === "append"
+          ? "Parameters differ here and in the source. Append mode keeps the existing request unchanged"
+          : "Changed here and in the source since the last import",
+      );
     case "ignored":
       return "Not in this workspace. Imports leave it alone until you check it";
     default:
@@ -731,20 +800,28 @@ function isMissingFolder(item: ImportPlanItem): boolean {
  * decide and a conflict is decided by its own control, so neither takes a checkbox — nor rides
  * along with a parent's.
  */
-function togglableItem(row: TreeRow): ImportPlanItem | null {
-  if (row.kind !== "item") return null;
-  const { item } = row;
-  return item.action === "unchanged" || item.action === "conflict" ? null : item;
+function isMutableInMode(item: ImportPlanItem, mode: ImportMode): boolean {
+  if (item.action === "unchanged" || item.action === "conflict") return false;
+  return mode === "full" || item.action === "create" || item.action === "ignored";
 }
 
-function togglableItems(node: CheckboxTreeNode<TreeRow>): ImportPlanItem[] {
+function togglableItem(row: TreeRow, mode: ImportMode): ImportPlanItem | null {
+  if (row.kind !== "item") return null;
+  const { item } = row;
+  return isMutableInMode(item, mode) ? item : null;
+}
+
+function togglableItems(node: CheckboxTreeNode<TreeRow>, mode: ImportMode): ImportPlanItem[] {
   return collectRows(node)
-    .map(togglableItem)
+    .map((row) => togglableItem(row, mode))
     .filter((i) => i != null);
 }
 
-function nodeCheckedStatus(node: CheckboxTreeNode<TreeRow>): boolean | "indeterminate" | "hidden" {
-  const covered = togglableItems(node);
+function nodeCheckedStatus(
+  node: CheckboxTreeNode<TreeRow>,
+  mode: ImportMode,
+): boolean | "indeterminate" | "hidden" {
+  const covered = togglableItems(node, mode);
   if (covered.length === 0) return "hidden";
   const selected = covered.filter((i) => i.selected).length;
   if (selected === covered.length) return true;

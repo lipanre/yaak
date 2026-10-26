@@ -5,7 +5,9 @@ use std::path::Path;
 use tauri::{Manager, Runtime, WebviewWindow};
 use yaak::import::{self, PlanImportDataParams};
 use yaak_api::{ApiClientKind, yaak_api_client};
-use yaak_models::util::{BatchUpsertResult, ImportDestination, ImportOrigin, ImportPlan};
+use yaak_models::util::{
+    BatchUpsertResult, ImportDestination, ImportMode, ImportOrigin, ImportPlan,
+};
 use yaak_plugins::MAX_IMPORT_BYTES;
 use yaak_plugins::events::ImportRequest;
 
@@ -25,6 +27,7 @@ pub(crate) async fn plan_import_data<R: Runtime>(
     file_paths: &[String],
     urls: &[String],
     destination: ImportDestination,
+    mode: ImportMode,
 ) -> Result<ImportPlan> {
     let plugin_manager = crate::plugins_ext::plugin_manager(window).await?;
     let plugin_context = window.plugin_context();
@@ -54,7 +57,12 @@ pub(crate) async fn plan_import_data<R: Runtime>(
             .map_err(|err| Error::GenericError(format!("Unable to import {url}: {err}")))?;
         inputs.push((response, url_origin(&url)));
     }
-    Ok(import::plan_import_batch_resources(&window.db_manager(), destination, inputs)?)
+    Ok(import::plan_import_batch_resources_with_mode(
+        &window.db_manager(),
+        destination,
+        inputs,
+        mode,
+    )?)
 }
 
 /// Which importer claims a source, without planning it. Backs the per-source status in the

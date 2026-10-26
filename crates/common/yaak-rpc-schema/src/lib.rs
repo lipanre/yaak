@@ -24,7 +24,7 @@ use yaak_models::models::{
     HttpResponseEvent, ImportSource, Plugin, Settings, WebsocketConnection, WebsocketEvent,
     WorkspaceMeta,
 };
-use yaak_models::util::{BatchUpsertResult, ImportDestination, ImportPlan};
+use yaak_models::util::{BatchUpsertResult, ImportDestination, ImportMode, ImportPlan};
 use yaak_plugins::api::{PluginNameVersion, PluginSearchResponse, PluginUpdatesResponse};
 use yaak_plugins::events::{
     CallFolderActionRequest, CallGrpcRequestActionRequest, CallHttpRequestActionRequest,
@@ -231,6 +231,8 @@ pub struct CmdImportDataReq {
     pub file_paths: Vec<String>,
     pub urls: Vec<String>,
     pub destination: ImportDestination,
+    #[serde(default)]
+    pub mode: ImportMode,
 }
 
 #[derive(Debug, Deserialize, TS)]

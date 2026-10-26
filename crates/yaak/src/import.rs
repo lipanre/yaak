@@ -12,9 +12,9 @@ use yaak_models::models::{
 };
 use yaak_models::query_manager::QueryManager;
 use yaak_models::util::{
-    BatchUpsertResult, ImportConflictResolution, ImportDestination, ImportOrigin, ImportPlan,
-    ImportPlanAction, ImportPlanItem, ImportPlanReason, ImportPlanSource, ImportPlanWarning,
-    ImportResourceType, UpdateSource,
+    BatchUpsertResult, ImportConflictResolution, ImportDestination, ImportMode, ImportOrigin,
+    ImportPlan, ImportPlanAction, ImportPlanItem, ImportPlanReason, ImportPlanSource,
+    ImportPlanWarning, ImportResourceType, UpdateSource,
 };
 use yaak_plugins::events::{ImportRequest, ImportResources, ImportResponse, PluginContext};
 use yaak_plugins::manager::PluginManager;
@@ -192,6 +192,18 @@ pub fn plan_import_batch_resources(
     combined.importer = importers.join(", ");
     validate_plan(&combined)?;
     Ok(combined)
+}
+
+/// Plan a batch with the user's requested replacement policy applied to its final shape.
+pub fn plan_import_batch_resources_with_mode(
+    query_manager: &QueryManager,
+    destination: ImportDestination,
+    inputs: Vec<(ImportResponse, ImportOrigin)>,
+    mode: ImportMode,
+) -> Result<ImportPlan> {
+    let mut plan = plan_import_batch_resources(query_manager, destination, inputs)?;
+    apply_import_mode(query_manager, &mut plan, mode)?;
+    Ok(plan)
 }
 
 /// Remap parsed importer resources into their selected destination.
@@ -1216,6 +1228,227 @@ fn merge_with_linked_source(
     }
 
     plan.items = items;
+    Ok(())
+}
+
+/// Apply the import policy after linked-source matching, when the plan's final resource IDs and
+/// comparison results are known.
+fn apply_import_mode(
+    query_manager: &QueryManager,
+    plan: &mut ImportPlan,
+    mode: ImportMode,
+) -> Result<()> {
+    match mode {
+        ImportMode::Append => {
+            // Existing resources stay in the plan so their parameter differences remain visible,
+            // but only genuinely missing resources are selected for commit.
+            apply_append_route_matches(&query_manager.connect(), plan)?;
+            for item in &mut plan.items {
+                if item.action == ImportPlanAction::Conflict {
+                    item.resolution = Some(ImportConflictResolution::KeepMine);
+                }
+                item.selected = item.action == ImportPlanAction::Create && item.selected;
+            }
+
+            let differences = plan
+                .items
+                .iter()
+                .filter(|item| {
+                    item.model == ImportResourceType::HttpRequest
+                        && matches!(
+                            item.action,
+                            ImportPlanAction::Update
+                                | ImportPlanAction::KeepLocal
+                                | ImportPlanAction::Conflict
+                        )
+                        && !item.changed_fields.is_empty()
+                })
+                .count();
+            if differences > 0 {
+                let noun = if differences == 1 { "request" } else { "requests" };
+                plan.warnings.push(ImportPlanWarning::warning(
+                    "Append leaves existing requests unchanged",
+                    format!(
+                        "Parameters or other settings differ for {differences} existing {noun}. Use Full import to replace them."
+                    ),
+                ));
+            }
+        }
+        ImportMode::Full => {
+            // Full import is an explicit overwrite. Source changes win over local edits, and every
+            // linked resource removed from the source is selected for deletion.
+            for item in &mut plan.items {
+                item.selected = item.action != ImportPlanAction::Unchanged;
+                if item.action == ImportPlanAction::Conflict {
+                    item.resolution = Some(ImportConflictResolution::TakeSource);
+                }
+            }
+            add_full_mode_request_deletions(&query_manager.connect(), plan)?;
+
+            let deletes = plan
+                .items
+                .iter()
+                .filter(|item| {
+                    item.model == ImportResourceType::HttpRequest
+                        && item.action == ImportPlanAction::Delete
+                        && item.selected
+                })
+                .count();
+            if deletes > 0 {
+                let noun = if deletes == 1 { "request" } else { "requests" };
+                plan.warnings.push(ImportPlanWarning::warning(
+                    "Full import deletes HTTP requests",
+                    format!(
+                        "{deletes} existing HTTP {noun} not present in this import will be deleted when applied."
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A workspace may contain requests that were not imported by Yaak, so linked-source keys alone
+/// cannot always tell us an endpoint already exists. Match only when both the incoming route and
+/// the existing route are unique, which avoids guessing when two requests share METHOD + URL.
+fn apply_append_route_matches(db: &ClientDb, plan: &mut ImportPlan) -> Result<()> {
+    let ImportDestination::ExistingWorkspace { workspace_id, .. } = &plan.destination else {
+        return Ok(());
+    };
+
+    let route = |request: &HttpRequest| {
+        let url = request.url.split(['?', '#']).next().unwrap_or_default().trim();
+        (request.method.to_ascii_uppercase(), url.to_string())
+    };
+    let mut existing_by_route: BTreeMap<(String, String), Vec<HttpRequest>> = BTreeMap::new();
+    for request in db.list_http_requests(workspace_id)? {
+        existing_by_route.entry(route(&request)).or_default().push(request);
+    }
+
+    let create_ids = plan
+        .items
+        .iter()
+        .filter(|item| {
+            item.model == ImportResourceType::HttpRequest && item.action == ImportPlanAction::Create
+        })
+        .map(|item| item.model_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut incoming_by_route: BTreeMap<(String, String), Vec<&HttpRequest>> = BTreeMap::new();
+    for request in &plan.resources.http_requests {
+        if create_ids.contains(&request.id) {
+            incoming_by_route.entry(route(request)).or_default().push(request);
+        }
+    }
+
+    let mut remap = BTreeMap::new();
+    let mut comparisons = BTreeMap::new();
+    for (route, incoming) in incoming_by_route {
+        if incoming.len() != 1 {
+            continue;
+        }
+        let Some(existing) = existing_by_route.get(&route).filter(|existing| existing.len() == 1)
+        else {
+            continue;
+        };
+        let incoming = incoming[0];
+        let existing = &existing[0];
+        let incoming_value = comparable(serde_json::to_value(incoming)?);
+        let existing_value = comparable(serde_json::to_value(existing)?);
+        let action = if incoming_value == existing_value {
+            ImportPlanAction::Unchanged
+        } else {
+            ImportPlanAction::KeepLocal
+        };
+        remap.insert(incoming.id.clone(), existing.id.clone());
+        comparisons.insert(
+            incoming.id.clone(),
+            (action, changed_fields(&incoming_value, &existing_value)),
+        );
+    }
+    if remap.is_empty() {
+        return Ok(());
+    }
+
+    remap_request_references(&mut plan.resources, &remap)?;
+    for request in &mut plan.resources.http_requests {
+        if let Some(existing_id) = remap.get(&request.id) {
+            request.id = existing_id.clone();
+        }
+    }
+    for item in &mut plan.items {
+        let Some((action, changed_fields)) = comparisons.get(&item.model_id) else {
+            continue;
+        };
+        if let Some(existing_id) = remap.get(&item.model_id) {
+            item.model_id = existing_id.clone();
+        }
+        item.action = *action;
+        item.selected = false;
+        item.changed_fields = changed_fields.clone();
+    }
+    plan.source_keys = std::mem::take(&mut plan.source_keys)
+        .into_iter()
+        .map(|(id, key)| (remap.get(&id).cloned().unwrap_or(id), key))
+        .collect();
+    Ok(())
+}
+
+/// Full import replaces the destination's HTTP collection, including requests that were never
+/// linked to this source. Other model types are left alone here; linked folders and environments
+/// already receive their own deletion offers from the source merge.
+fn add_full_mode_request_deletions(db: &ClientDb, plan: &mut ImportPlan) -> Result<()> {
+    let ImportDestination::ExistingWorkspace { workspace_id, folder_id } = &plan.destination else {
+        return Ok(());
+    };
+
+    let incoming_ids = plan
+        .resources
+        .http_requests
+        .iter()
+        .map(|request| request.id.clone())
+        .collect::<BTreeSet<_>>();
+    let planned_ids = plan.items.iter().map(|item| item.model_id.clone()).collect::<BTreeSet<_>>();
+
+    let folder_scope = if let Some(root_id) = folder_id {
+        let mut scope = BTreeSet::from([root_id.clone()]);
+        let folders = db.list_folders(workspace_id)?;
+        loop {
+            let before = scope.len();
+            for folder in &folders {
+                if folder.folder_id.as_ref().is_some_and(|id| scope.contains(id)) {
+                    scope.insert(folder.id.clone());
+                }
+            }
+            if scope.len() == before {
+                break;
+            }
+        }
+        Some(scope)
+    } else {
+        None
+    };
+
+    for request in db.list_http_requests(workspace_id)? {
+        if incoming_ids.contains(&request.id) || planned_ids.contains(&request.id) {
+            continue;
+        }
+        if let Some(scope) = &folder_scope
+            && !request.folder_id.as_ref().is_some_and(|id| scope.contains(id))
+        {
+            continue;
+        }
+        plan.items.push(ImportPlanItem {
+            action: ImportPlanAction::Delete,
+            model: ImportResourceType::HttpRequest,
+            model_id: request.id,
+            name: request.name,
+            parent_id: request.folder_id,
+            selected: true,
+            resolution: None,
+            reason: None,
+            changed_fields: Vec::new(),
+        });
+    }
     Ok(())
 }
 
@@ -2753,6 +2986,31 @@ mod tests {
         .expect("plan re-import")
     }
 
+    fn replan_with_mode(
+        query_manager: &QueryManager,
+        workspace_id: &str,
+        resources: ImportResources,
+        mode: ImportMode,
+    ) -> ImportPlan {
+        plan_import_batch_resources_with_mode(
+            query_manager,
+            ImportDestination::ExistingWorkspace {
+                workspace_id: workspace_id.to_string(),
+                folder_id: None,
+            },
+            vec![(
+                ImportResponse {
+                    importer: "OpenAPI".to_string(),
+                    resources,
+                    source_keys: Some(importer_keys()),
+                },
+                linked_origin(),
+            )],
+            mode,
+        )
+        .expect("plan re-import with mode")
+    }
+
     fn extra_request() -> HttpRequest {
         HttpRequest {
             id: "rq_extra".to_string(),
@@ -3003,6 +3261,172 @@ mod tests {
         );
         let plan = replan(&query_manager, &workspace_id, resources);
         assert_eq!(item_by_name(&plan, "Root Request").action, ImportPlanAction::Unchanged);
+    }
+
+    #[test]
+    fn append_mode_adds_missing_requests_and_reports_existing_differences() {
+        let (query_manager, _blob_manager, _rx) =
+            yaak_models::init_in_memory().expect("initialize database");
+        let committed = first_import(&query_manager);
+        let workspace_id = committed.workspaces[0].id.clone();
+
+        let mut resources = imported_resources();
+        resources.http_requests[0].url = "https://example.com/root-v2".to_string();
+        resources.http_requests.push(extra_request());
+
+        let plan = replan_with_mode(&query_manager, &workspace_id, resources, ImportMode::Append);
+        let root = item_by_name(&plan, "Root Request");
+        assert_eq!(root.action, ImportPlanAction::Update);
+        assert!(!root.selected, "append mode must not update an existing request");
+        assert_eq!(root.changed_fields, vec!["url".to_string()]);
+        assert!(item_by_name(&plan, "Extra Request").selected);
+        assert!(plan.warnings.iter().any(|warning| {
+            warning.title == "Append leaves existing requests unchanged"
+                && warning.detail.contains("1 existing request")
+        }));
+
+        commit_import_plan(&query_manager, plan).expect("commit append");
+        let requests = query_manager.connect().list_http_requests(&workspace_id).unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests.iter().any(|request| {
+            request.name == "Root Request" && request.url == "https://example.com/root"
+        }));
+        assert!(requests.iter().any(|request| request.name == "Extra Request"));
+    }
+
+    #[test]
+    fn append_mode_matches_unique_existing_routes_without_a_previous_import() {
+        let (query_manager, _blob_manager, _rx) =
+            yaak_models::init_in_memory().expect("initialize database");
+        let workspace_id = "wk_existing".to_string();
+        let request_id = "rq_existing".to_string();
+        query_manager
+            .with_tx(|db| {
+                db.upsert_workspace(
+                    &Workspace {
+                        id: workspace_id.clone(),
+                        model: "workspace".to_string(),
+                        name: "Existing".to_string(),
+                        ..Default::default()
+                    },
+                    &UpdateSource::Background,
+                )?;
+                db.upsert_http_request(
+                    &HttpRequest {
+                        id: request_id.clone(),
+                        model: "http_request".to_string(),
+                        workspace_id: workspace_id.clone(),
+                        name: "Root Request".to_string(),
+                        method: "GET".to_string(),
+                        url: "https://example.com/root?local=true".to_string(),
+                        ..Default::default()
+                    },
+                    &UpdateSource::Background,
+                )
+            })
+            .expect("seed existing workspace");
+
+        let mut resources = imported_resources();
+        resources.http_requests.truncate(1);
+        resources.http_requests[0].headers.push(HttpRequestHeader {
+            enabled: true,
+            name: "X-Source".to_string(),
+            value: "new".to_string(),
+            id: None,
+        });
+        let plan = plan_import_batch_resources_with_mode(
+            &query_manager,
+            ImportDestination::ExistingWorkspace {
+                workspace_id: workspace_id.clone(),
+                folder_id: None,
+            },
+            vec![(
+                ImportResponse {
+                    importer: "OpenAPI".to_string(),
+                    resources,
+                    source_keys: Some(importer_keys()),
+                },
+                linked_origin(),
+            )],
+            ImportMode::Append,
+        )
+        .expect("plan append");
+
+        let root = item_by_name(&plan, "Root Request");
+        assert_eq!(root.model_id, request_id);
+        assert_eq!(root.action, ImportPlanAction::KeepLocal);
+        assert!(!root.selected);
+        assert_eq!(root.changed_fields, vec!["headers".to_string(), "url".to_string()]);
+
+        commit_import_plan(&query_manager, plan).expect("commit route match");
+        assert_eq!(
+            query_manager.connect().list_http_requests(&workspace_id).unwrap().len(),
+            1,
+            "route matching must not create a duplicate request"
+        );
+        let root_row = source_rows(&query_manager, &workspace_id)
+            .into_iter()
+            .find(|row| row.source_key == "op:root")
+            .expect("root source row");
+        assert_eq!(root_row.model_id.as_deref(), Some(request_id.as_str()));
+    }
+
+    #[test]
+    fn full_mode_takes_source_changes_and_deletes_unmatched_http_requests() {
+        let (query_manager, _blob_manager, _rx) =
+            yaak_models::init_in_memory().expect("initialize database");
+        let committed = first_import(&query_manager);
+        let workspace_id = committed.workspaces[0].id.clone();
+        let root_id = committed
+            .http_requests
+            .iter()
+            .find(|request| request.name == "Root Request")
+            .expect("root request")
+            .id
+            .clone();
+
+        query_manager
+            .with_tx(|db| {
+                let root = db.get_http_request(&root_id)?;
+                db.upsert_http_request(
+                    &HttpRequest { url: "https://example.com/root-local".to_string(), ..root },
+                    &UpdateSource::Background,
+                )?;
+                db.upsert_http_request(
+                    &HttpRequest {
+                        id: "rq_manual".to_string(),
+                        model: "http_request".to_string(),
+                        workspace_id: workspace_id.clone(),
+                        name: "Manual Request".to_string(),
+                        method: "GET".to_string(),
+                        url: "https://example.com/manual".to_string(),
+                        ..Default::default()
+                    },
+                    &UpdateSource::Background,
+                )
+            })
+            .expect("add local changes");
+
+        let mut resources = imported_resources();
+        resources.http_requests[0].url = "https://example.com/root-v2".to_string();
+        resources.http_requests.remove(1);
+
+        let plan = replan_with_mode(&query_manager, &workspace_id, resources, ImportMode::Full);
+        let root = item_by_name(&plan, "Root Request");
+        assert_eq!(root.action, ImportPlanAction::Conflict);
+        assert_eq!(root.resolution, Some(ImportConflictResolution::TakeSource));
+        assert!(item_by_name(&plan, "Nested Request").selected);
+        assert!(item_by_name(&plan, "Manual Request").selected);
+        assert!(plan.warnings.iter().any(|warning| {
+            warning.title == "Full import deletes HTTP requests"
+                && warning.detail.contains("2 existing HTTP requests")
+        }));
+
+        commit_import_plan(&query_manager, plan).expect("commit full import");
+        let requests = query_manager.connect().list_http_requests(&workspace_id).unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].name, "Root Request");
+        assert_eq!(requests[0].url, "https://example.com/root-v2");
     }
 
     #[test]

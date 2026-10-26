@@ -1,6 +1,7 @@
 import {
   type BatchUpsertResult,
   type ImportDestination,
+  type ImportMode,
   type ImportPlan,
   type ImportSource,
   workspacesAtom,
@@ -20,11 +21,16 @@ import { rpc } from "./rpc";
 
 // Stable identities so the dialog's effects don't re-run (and cancel in-flight
 // fetches) every time the dialog container re-renders.
-const planSources = (sources: ImportSourcePath[], destination: ImportDestination) =>
+const planSources = (
+  sources: ImportSourcePath[],
+  destination: ImportDestination,
+  mode: ImportMode,
+) =>
   rpc<ImportPlan>("cmd_import_data", {
     filePaths: sources.filter((source) => source.kind !== "url").map((source) => source.path),
     urls: sources.filter((source) => source.kind === "url").map((source) => source.path),
     destination,
+    mode,
   });
 const detectSource = (source: ImportSourcePath) =>
   rpc<string>(

@@ -103,6 +103,18 @@ pub enum ImportDestination {
     },
 }
 
+/// How incoming resources relate to the destination's existing resources.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "gen_util.ts")]
+pub enum ImportMode {
+    /// Import only resources that do not already exist in the destination.
+    Append,
+    /// Replace the destination's HTTP requests with the requests in the source.
+    #[default]
+    Full,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "gen_util.ts")]

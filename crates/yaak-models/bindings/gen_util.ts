@@ -30,6 +30,11 @@ export type ImportDestination =
   | { type: "existing_workspace"; workspaceId: string; folderId?: string };
 
 /**
+ * How incoming resources relate to the destination's existing resources.
+ */
+export type ImportMode = "append" | "full";
+
+/**
  * Where an import's contents came from, used to link the committed workspace back to it.
  */
 export type ImportOrigin = {

@@ -6,7 +6,7 @@ import type { ServiceDefinition } from "./gen_grpc";
 import type { AnyModel, GraphQlIntrospection, GrpcEvent, HttpRequest, HttpRequestHeader, HttpResponse, HttpResponseEvent, ImportSource, Plugin, Settings, WebsocketConnection, WebsocketEvent, WorkspaceMeta } from "./gen_models";
 import type { PluginMetadata } from "./gen_search";
 import type { SyncOp } from "./gen_sync";
-import type { BatchUpsertResult, ImportDestination, ImportPlan } from "./gen_util";
+import type { BatchUpsertResult, ImportDestination, ImportMode, ImportPlan } from "./gen_util";
 import type { Tokens } from "./parser";
 import type { ServerSentEvent } from "./sse";
 
@@ -147,7 +147,7 @@ export type CmdHttpResponseBodyPathReq = { responseId: string, };
 
 export type CmdHttpResponseBodyReq = { responseId: string, filter: string | null, };
 
-export type CmdImportDataReq = { filePaths: Array<string>, urls: Array<string>, destination: ImportDestination, };
+export type CmdImportDataReq = { filePaths: Array<string>, urls: Array<string>, destination: ImportDestination, mode: ImportMode, };
 
 export type CmdImportSourcesForOriginReq = { filePath?: string, url?: string, };
 
